@@ -1,5 +1,5 @@
-// Service Worker - Offline support & caching
-const CACHE_NAME = 'mini-weather-v1';
+// Service Worker - Offline support, caching, and notifications
+const CACHE_NAME = 'mini-weather-v2';
 const URLS_TO_CACHE = [
     '/',
     '/index.html',
@@ -35,7 +35,7 @@ self.addEventListener('fetch', event => {
     // Skip non-GET requests
     if (event.request.method !== 'GET') return;
 
-    // API requests - network first
+    // API requests - network first with cache fallback
     if (event.request.url.includes('api.open-meteo.com') ||
         event.request.url.includes('api.weather.gov') ||
         event.request.url.includes('wttr.in') ||
@@ -64,7 +64,11 @@ self.addEventListener('fetch', event => {
 
 self.addEventListener('message', event => {
     if (event.data.type === 'SHOW_NOTIFICATION') {
-        self.registration.showNotification(event.data.title, event.data.options);
+        self.registration.showNotification(event.data.title, {
+            icon: '/icon-192x192.png',
+            badge: '/icon-192x192.png',
+            ...event.data.options
+        });
     }
 });
 

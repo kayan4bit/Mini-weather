@@ -1,5 +1,5 @@
-// Mini Weather - Privacy-First, Multi-API Weather App
-// Features: Location access button, multiple weather APIs, fast & accurate
+// Mini Weather - Complete Rewrite with All Features
+// Features: Location access, Virtual Garden, Streaks, Push Notifications, Multiple Themes, Real-time Weather
 
 class WeatherApp {
     constructor() {
@@ -7,8 +7,35 @@ class WeatherApp {
         this.currentWeather = null;
         this.unit = localStorage.getItem('mini-weather-unit') || 'C';
         this.apiSource = localStorage.getItem('mini-weather-api') || 'open-meteo';
+        this.theme = localStorage.getItem('mini-weather-theme') || 'dark';
+        this.streak = parseInt(localStorage.getItem('mini-weather-streak') || '0');
+        this.lastCheckDate = localStorage.getItem('mini-weather-last-check') || '';
         this.cache = new Map();
         this.cacheTime = 10 * 60 * 1000; // 10 minutes
+        this.updateInterval = null;
+
+        this.themes = {
+            'dark': { name: 'Dark', bg: '#0a0a0a', bgAlt: '#1a1a1a', text: '#ffffff', accent: '#1e88e5' },
+            'light': { name: 'Light', bg: '#ffffff', bgAlt: '#f5f5f5', text: '#000000', accent: '#1e88e5' },
+            'ocean': { name: 'Ocean', bg: '#0a1628', bgAlt: '#1a3a52', text: '#e0f2f1', accent: '#00bcd4' },
+            'sunset': { name: 'Sunset', bg: '#1a0a0a', bgAlt: '#3a1a0a', text: '#ffe0b2', accent: '#ff6f00' },
+            'forest': { name: 'Forest', bg: '#0a1a0a', bgAlt: '#1a3a1a', text: '#c8e6c9', accent: '#4caf50' },
+            'lavender': { name: 'Lavender', bg: '#1a0a2e', bgAlt: '#2a1a4e', text: '#e1bee7', accent: '#9c27b0' },
+            'berry': { name: 'Berry', bg: '#2a0a1a', bgAlt: '#4a1a3a', text: '#f8bbd0', accent: '#e91e63' },
+            'mint': { name: 'Mint', bg: '#0a2a1a', bgAlt: '#1a4a3a', text: '#b2dfdb', accent: '#009688' },
+            'coffee': { name: 'Coffee', bg: '#1a0f0a', bgAlt: '#3a2a1a', text: '#d7ccc8', accent: '#795548' },
+            'nord': { name: 'Nord', bg: '#2e3440', bgAlt: '#3b4252', text: '#eceff4', accent: '#88c0d0' },
+            'dracula': { name: 'Dracula', bg: '#282a36', bgAlt: '#44475a', text: '#f8f8f2', accent: '#ff79c6' },
+            'gruvbox': { name: 'Gruvbox', bg: '#282828', bgAlt: '#3c3836', text: '#ebdbb2', accent: '#fe8019' },
+            'solarized': { name: 'Solarized', bg: '#002b36', bgAlt: '#073642', text: '#93a1a1', accent: '#268bd2' },
+            'cyberpunk': { name: 'Cyberpunk', bg: '#0d0221', bgAlt: '#1a0033', text: '#ff006e', accent: '#00f5ff' },
+            'monochrome': { name: 'Monochrome', bg: '#1a1a1a', bgAlt: '#2a2a2a', text: '#e0e0e0', accent: '#808080' },
+            'warm': { name: 'Warm', bg: '#2a1a0a', bgAlt: '#4a2a0a', text: '#ffd7a8', accent: '#ff9800' },
+            'cool': { name: 'Cool', bg: '#0a1a2a', bgAlt: '#1a3a4a', text: '#a8d8ff', accent: '#2196f3' },
+            'neon': { name: 'Neon', bg: '#0a0a0a', bgAlt: '#1a1a1a', text: '#00ff00', accent: '#ff00ff' },
+            'pastel': { name: 'Pastel', bg: '#faf8f3', bgAlt: '#f5f3ee', text: '#5a5a5a', accent: '#ff9999' },
+            'retro': { name: 'Retro', bg: '#3a3a3a', bgAlt: '#5a5a5a', text: '#ffff00', accent: '#ff00ff' },
+        };
 
         this.apis = {
             'open-meteo': {
@@ -28,8 +55,33 @@ class WeatherApp {
             }
         };
 
+        this.applyTheme(this.theme);
         this.initEventListeners();
         this.registerServiceWorker();
+        this.updateStreak();
+    }
+
+    applyTheme(themeName) {
+        const theme = this.themes[themeName];
+        if (!theme) return;
+        
+        document.documentElement.style.setProperty('--bg', theme.bg);
+        document.documentElement.style.setProperty('--bg-alt', theme.bgAlt);
+        document.documentElement.style.setProperty('--text', theme.text);
+        document.documentElement.style.setProperty('--accent', theme.accent);
+        this.theme = themeName;
+        localStorage.setItem('mini-weather-theme', themeName);
+    }
+
+    updateStreak() {
+        const today = new Date().toDateString();
+        if (this.lastCheckDate !== today) {
+            this.lastCheckDate = today;
+            this.streak++;
+            localStorage.setItem('mini-weather-streak', this.streak);
+            localStorage.setItem('mini-weather-last-check', today);
+        }
+        document.getElementById('streak-count').textContent = this.streak;
     }
 
     initEventListeners() {
@@ -37,15 +89,54 @@ class WeatherApp {
         document.getElementById('refresh-btn').addEventListener('click', () => this.refresh());
         document.getElementById('unit-btn').addEventListener('click', () => this.toggleUnit());
         document.getElementById('api-btn').addEventListener('click', () => this.showAPIModal());
+        document.getElementById('theme-btn').addEventListener('click', () => this.showThemeModal());
+        document.getElementById('notify-btn').addEventListener('click', () => this.requestNotifications());
 
         document.getElementById('api-modal').addEventListener('click', (e) => {
             if (e.target.id === 'api-modal') this.closeAPIModal();
+        });
+
+        document.getElementById('theme-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'theme-modal') this.closeThemeModal();
         });
     }
 
     registerServiceWorker() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js').catch(() => {});
+        }
+    }
+
+    async requestNotifications() {
+        if (!('Notification' in window)) {
+            alert('Notifications not supported');
+            return;
+        }
+
+        if (Notification.permission === 'granted') {
+            this.sendNotification('Notifications', { body: 'Already enabled!' });
+            return;
+        }
+
+        if (Notification.permission !== 'denied') {
+            const permission = await Notification.requestPermission();
+            if (permission === 'granted') {
+                this.sendNotification('Mini Weather', { body: 'Notifications enabled! You\'ll get weather alerts.' });
+            }
+        }
+    }
+
+    sendNotification(title, options = {}) {
+        if (Notification.permission === 'granted') {
+            if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({
+                    type: 'SHOW_NOTIFICATION',
+                    title,
+                    options
+                });
+            } else {
+                new Notification(title, options);
+            }
         }
     }
 
@@ -57,9 +148,9 @@ class WeatherApp {
         try {
             const position = await new Promise((resolve, reject) => {
                 navigator.geolocation.getCurrentPosition(resolve, reject, {
-                    enableHighAccuracy: false,
+                    enableHighAccuracy: true,
                     timeout: 10000,
-                    maximumAge: 300000
+                    maximumAge: 0
                 });
             });
 
@@ -68,6 +159,7 @@ class WeatherApp {
             localStorage.setItem('mini-weather-location', JSON.stringify(this.currentLocation));
 
             await this.fetchWeather();
+            this.startAutoUpdate();
         } catch (error) {
             this.showError('Location access denied. Please enable location permissions.');
             console.error('Location error:', error);
@@ -75,6 +167,12 @@ class WeatherApp {
             btn.disabled = false;
             btn.textContent = '📍';
         }
+    }
+
+    startAutoUpdate() {
+        if (this.updateInterval) clearInterval(this.updateInterval);
+        // Update every 5 minutes
+        this.updateInterval = setInterval(() => this.fetchWeather(), 5 * 60 * 1000);
     }
 
     async fetchWeather() {
@@ -114,7 +212,7 @@ class WeatherApp {
         const params = new URLSearchParams({
             latitude: lat.toFixed(3),
             longitude: lon.toFixed(3),
-            current: 'temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m,relative_humidity_2m,apparent_temperature,pressure_msl,visibility,uv_index,precipitation,cloud_cover',
+            current: 'temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m,relative_humidity_2m,apparent_temperature,pressure_msl,visibility,uv_index,precipitation,cloud_cover,dew_point_2m',
             hourly: 'temperature_2m,weather_code,precipitation_probability,wind_speed_10m,relative_humidity_2m',
             daily: 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,uv_index_max,sunrise,sunset',
             timezone: 'auto',
@@ -156,7 +254,8 @@ class WeatherApp {
                 visibility: current.visibility / 1000,
                 uvIndex: current.uv_index,
                 cloudCover: current.cloud_cover,
-                precipitation: current.precipitation || 0
+                precipitation: current.precipitation || 0,
+                dewPoint: current.dew_point_2m
             },
             hourly: hourly.time.slice(0, 48).map((time, i) => ({
                 time,
@@ -182,7 +281,6 @@ class WeatherApp {
     }
 
     async fetchNWS(lat, lon) {
-        // National Weather Service (US only)
         const gridResponse = await fetch(`https://api.weather.gov/points/${lat},${lon}`, {
             signal: AbortSignal.timeout(8000)
         });
@@ -225,7 +323,8 @@ class WeatherApp {
                 visibility: 10,
                 uvIndex: 5,
                 cloudCover: 50,
-                precipitation: 0
+                precipitation: 0,
+                dewPoint: 10
             },
             hourly: [],
             daily: periods.filter((_, i) => i % 2 === 0).slice(0, 7).map(p => ({
@@ -278,7 +377,8 @@ class WeatherApp {
                 visibility: current.visibility,
                 uvIndex: current.uvIndex,
                 cloudCover: current.cloudcover,
-                precipitation: current.precipMM || 0
+                precipitation: current.precipMM || 0,
+                dewPoint: 10
             },
             hourly: [],
             daily: forecast.hourly.slice(0, 7).map((h, i) => ({
@@ -357,6 +457,80 @@ class WeatherApp {
         return this.unit === 'F' ? 'mph' : 'km/h';
     }
 
+    getGardenState(temp, humidity, windSpeed, precipitation, uvIndex) {
+        let score = 0;
+        let details = [];
+
+        // Temperature scoring
+        if (temp >= 15 && temp <= 25) {
+            score += 25;
+            details.push('✓ Perfect temperature');
+        } else if (temp >= 10 && temp <= 30) {
+            score += 15;
+            details.push('✓ Acceptable temperature');
+        } else {
+            score += 5;
+            details.push('✗ Extreme temperature');
+        }
+
+        // Humidity scoring
+        if (humidity >= 40 && humidity <= 70) {
+            score += 25;
+            details.push('✓ Ideal humidity');
+        } else if (humidity >= 30 && humidity <= 80) {
+            score += 15;
+            details.push('✓ Good humidity');
+        } else {
+            score += 5;
+            details.push('✗ Poor humidity');
+        }
+
+        // Wind scoring
+        if (windSpeed < 15) {
+            score += 20;
+            details.push('✓ Calm winds');
+        } else if (windSpeed < 30) {
+            score += 10;
+            details.push('⚠ Breezy');
+        } else {
+            score += 2;
+            details.push('✗ Strong winds');
+        }
+
+        // Precipitation scoring
+        if (precipitation === 0) {
+            score += 15;
+            details.push('✓ No precipitation');
+        } else if (precipitation < 5) {
+            score += 10;
+            details.push('✓ Light rain good');
+        } else if (precipitation < 20) {
+            score += 5;
+            details.push('⚠ Heavy rain');
+        } else {
+            score += 1;
+            details.push('✗ Very heavy rain');
+        }
+
+        // UV Index scoring
+        if (uvIndex <= 3) {
+            score += 15;
+            details.push('✓ Safe UV');
+        } else if (uvIndex <= 6) {
+            score += 10;
+            details.push('⚠ Moderate UV');
+        } else {
+            score += 5;
+            details.push('✗ High UV');
+        }
+
+        // Determine state
+        if (score >= 90) return { state: 'thriving', emoji: '🌻', text: 'THRIVING', details };
+        if (score >= 70) return { state: 'healthy', emoji: '🌱', text: 'HEALTHY', details };
+        if (score >= 50) return { state: 'stressed', emoji: '🌾', text: 'STRESSED', details };
+        return { state: 'wilted', emoji: '🍂', text: 'WILTED', details };
+    }
+
     async render() {
         if (!this.currentWeather) return;
 
@@ -401,20 +575,44 @@ class WeatherApp {
                         <div class="stat-label">👁️ Visibility</div>
                         <div class="stat-value">${current.visibility.toFixed(1)} km</div>
                     </div>
+                    <div class="stat">
+                        <div class="stat-label">💧 Dew Point</div>
+                        <div class="stat-value">${Math.round(current.dewPoint)}°</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">☁️ Cloud Cover</div>
+                        <div class="stat-value">${current.cloudCover}%</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">💧 Precipitation</div>
+                        <div class="stat-value">${current.precipitation} mm</div>
+                    </div>
                 </div>
 
                 <div class="source-badge">📡 ${source}</div>
         `;
 
         // Alerts
+        const alerts = [];
         if (current.uvIndex > 8) {
-            html += '<div class="alerts"><div class="alert alert-danger">☀️ EXTREME UV: ${Math.round(current.uvIndex)}</div></div>';
+            alerts.push(`<div class="alert alert-danger">☀️ EXTREME UV: ${Math.round(current.uvIndex)}</div>`);
+            this.sendNotification('UV Alert', { body: `Extreme UV Index: ${Math.round(current.uvIndex)}` });
         } else if (current.uvIndex > 6) {
-            html += '<div class="alerts"><div class="alert alert-warning">☀️ High UV: ${Math.round(current.uvIndex)}</div></div>';
+            alerts.push(`<div class="alert alert-warning">☀️ High UV: ${Math.round(current.uvIndex)}</div>`);
         }
 
         if (current.windSpeed > 40) {
-            html += '<div class="alert alert-warning">💨 Strong winds: ${Math.round(current.windSpeed)} ${this.getWindUnit()}</div>';
+            alerts.push(`<div class="alert alert-warning">💨 Strong winds: ${Math.round(current.windSpeed)} ${this.getWindUnit()}</div>`);
+            this.sendNotification('Wind Alert', { body: `Strong winds: ${Math.round(current.windSpeed)} ${this.getWindUnit()}` });
+        }
+
+        if (daily.length > 0 && daily[0].precipChance > 80) {
+            alerts.push(`<div class="alert alert-warning">⛈️ Heavy rain expected: ${daily[0].precipChance}%</div>`);
+            this.sendNotification('Rain Alert', { body: `Heavy rain expected: ${daily[0].precipChance}%` });
+        }
+
+        if (alerts.length > 0) {
+            html += `<div class="alerts">${alerts.join('')}</div>`;
         }
 
         // Hourly forecast
@@ -454,6 +652,24 @@ class WeatherApp {
 
         html += '</div>';
         document.getElementById('weather-content').innerHTML = html;
+
+        // Update garden
+        const gardenState = this.getGardenState(
+            current.temp,
+            current.humidity,
+            current.windSpeed,
+            current.precipitation,
+            current.uvIndex
+        );
+
+        const gardenContainer = document.getElementById('garden-container');
+        gardenContainer.style.display = 'block';
+        document.getElementById('garden-plant').className = `garden-plant ${gardenState.state}`;
+        document.getElementById('garden-plant').textContent = gardenState.emoji;
+        document.getElementById('garden-status').innerHTML = `
+            <strong>${gardenState.text}</strong><br>
+            ${gardenState.details.map(d => `<div style="font-size: 0.8rem; margin: 4px 0;">${d}</div>`).join('')}
+        `;
     }
 
     showLoading() {
@@ -507,6 +723,29 @@ class WeatherApp {
     closeAPIModal() {
         document.getElementById('api-modal').classList.remove('active');
     }
+
+    showThemeModal() {
+        const modal = document.getElementById('theme-modal');
+        const list = document.getElementById('theme-list');
+        list.innerHTML = '';
+
+        Object.entries(this.themes).forEach(([key, theme]) => {
+            const div = document.createElement('div');
+            div.className = 'theme-option' + (key === this.theme ? ' selected' : '');
+            div.innerHTML = `<div class="api-name">${theme.name}</div>`;
+            div.addEventListener('click', () => {
+                this.applyTheme(key);
+                this.closeThemeModal();
+            });
+            list.appendChild(div);
+        });
+
+        modal.classList.add('active');
+    }
+
+    closeThemeModal() {
+        document.getElementById('theme-modal').classList.remove('active');
+    }
 }
 
 // Initialize app
@@ -517,5 +756,6 @@ const savedLocation = localStorage.getItem('mini-weather-location');
 if (savedLocation) {
     app.currentLocation = JSON.parse(savedLocation);
     app.fetchWeather();
+    app.startAutoUpdate();
 }
 

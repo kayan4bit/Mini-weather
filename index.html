@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-    <meta name="description" content="Mini Weather - Accurate, Fast, Privacy-First Weather">
+    <meta name="description" content="Mini Weather - Accurate, Fast, Privacy-First Weather with Virtual Garden">
     <meta name="theme-color" content="#1e88e5">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -53,6 +53,7 @@
             justify-content: space-between;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
         }
 
         .logo {
@@ -67,6 +68,7 @@
         .controls {
             display: flex;
             gap: 8px;
+            flex-wrap: wrap;
         }
 
         button {
@@ -88,6 +90,7 @@
 
         button:active { transform: scale(0.95); }
         button:hover { background: var(--accent); border-color: var(--accent); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .location-section {
             background: linear-gradient(135deg, var(--bg-alt) 0%, rgba(255,255,255,0.05) 100%);
@@ -110,6 +113,17 @@
         .location-name { font-weight: 600; font-size: 1rem; }
         .location-coords { font-size: 0.75rem; color: var(--text-dim); }
         .location-time { font-size: 0.7rem; color: var(--text-dim); opacity: 0.7; }
+
+        .streak-display {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: rgba(255,193,7,0.1);
+            border: 1px solid rgba(255,193,7,0.3);
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
 
         .main-container {
             display: grid;
@@ -219,6 +233,39 @@
         .day-max { color: #64b5f6; font-weight: 600; }
         .day-min { color: var(--text-dim); }
 
+        .garden-section {
+            background: linear-gradient(135deg, var(--bg-alt) 0%, rgba(255,255,255,0.05) 100%);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .garden-plant {
+            font-size: 6rem;
+            margin: 20px 0;
+            animation: grow 0.8s ease-out;
+            transition: transform 0.3s ease;
+        }
+
+        .garden-plant.thriving { animation: thriving 2s ease-in-out infinite; }
+        .garden-plant.healthy { animation: healthy 2s ease-in-out infinite; }
+        .garden-plant.stressed { animation: stressed 2s ease-in-out infinite; }
+        .garden-plant.wilted { animation: wilted 2s ease-in-out infinite; }
+
+        @keyframes grow { from { transform: scale(0); } to { transform: scale(1); } }
+        @keyframes thriving { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+        @keyframes healthy { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+        @keyframes stressed { 0%, 100% { transform: rotate(-2deg); } 50% { transform: rotate(2deg); } }
+        @keyframes wilted { 0%, 100% { transform: rotate(-5deg) scaleY(0.9); } 50% { transform: rotate(5deg) scaleY(0.85); } }
+
+        .garden-status {
+            font-size: 0.9rem;
+            color: var(--text-dim);
+            margin-top: 12px;
+            line-height: 1.6;
+        }
+
         .alerts {
             margin-top: 16px;
             display: flex;
@@ -301,7 +348,7 @@
 
         .modal-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; }
 
-        .api-option {
+        .api-option, .theme-option {
             padding: 12px;
             border: 1px solid var(--border);
             border-radius: 8px;
@@ -310,8 +357,8 @@
             transition: var(--transition);
         }
 
-        .api-option:hover { background: rgba(30,136,229,0.1); border-color: var(--accent); }
-        .api-option.selected { background: rgba(30,136,229,0.2); border-color: var(--accent); }
+        .api-option:hover, .theme-option:hover { background: rgba(30,136,229,0.1); border-color: var(--accent); }
+        .api-option.selected, .theme-option.selected { background: rgba(30,136,229,0.2); border-color: var(--accent); }
 
         .api-name { font-weight: 600; font-size: 0.9rem; }
         .api-desc { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
@@ -331,6 +378,7 @@
             .stat { padding: 10px 8px; }
             .daily { grid-template-columns: repeat(auto-fit, minmax(95px, 1fr)); }
             button { padding: 6px 10px; font-size: 0.75rem; }
+            .garden-plant { font-size: 4rem; }
         }
 
         @media (min-width: 1024px) and (orientation: landscape) {
@@ -346,7 +394,9 @@
         <div class="logo">☀️ Mini Weather</div>
         <div class="controls">
             <button id="location-btn" title="Get Location">📍</button>
+            <button id="notify-btn" title="Enable Notifications">🔔</button>
             <button id="api-btn" title="API Source">🔌</button>
+            <button id="theme-btn" title="Theme">🎨</button>
             <button id="unit-btn" title="°C/°F">°C</button>
             <button id="refresh-btn" title="Refresh">🔄</button>
         </div>
@@ -358,6 +408,13 @@
             <div class="location-coords" id="loc-coords">-</div>
             <div class="location-time" id="loc-time">-</div>
         </div>
+        <div class="streak-display">
+            <span>🔥</span>
+            <div>
+                <div style="font-weight: 600;" id="streak-count">0</div>
+                <div style="font-size: 0.7rem;">day streak</div>
+            </div>
+        </div>
     </div>
 
     <div id="weather-content" class="main-container">
@@ -367,8 +424,14 @@
         </div>
     </div>
 
+    <div id="garden-container" class="garden-section" style="display: none;">
+        <div class="section-title">🌱 Virtual Garden</div>
+        <div class="garden-plant" id="garden-plant">🌱</div>
+        <div class="garden-status" id="garden-status">Waiting for weather data...</div>
+    </div>
+
     <footer>
-        <p>Mini Weather • Privacy-First • No Tracking</p>
+        <p>Mini Weather • Privacy-First • No Tracking • Real-time Updates</p>
     </footer>
 </div>
 
@@ -376,6 +439,13 @@
     <div class="modal-content">
         <div class="modal-title">Weather Data Source</div>
         <div id="api-list"></div>
+    </div>
+</div>
+
+<div id="theme-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-title">Choose Theme</div>
+        <div id="theme-list"></div>
     </div>
 </div>
 
