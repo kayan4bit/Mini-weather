@@ -1,7 +1,10 @@
 /**
  * Mini Weather — Production-Ready Weather App
  * APIs: WeatherAPI.com (primary), Open-Meteo, NWS, wttr.in
- * Features: Virtual Garden, 80+ Themes, Device Detection, PWA, Notifications
+ * Features: Search, Favourites, History, Export, Comparison, Filtering,
+ *           Virtual Garden, 80+ Themes, Device Detection, PWA, Notifications
+ *
+ * @version 2.0.0
  */
 
 'use strict';
@@ -905,6 +908,39 @@ class WeatherApp {
             if (e.target.id === 'api-modal') this.closeAPIModal();
         });
 
+        // Favourites save button
+        document.getElementById('fav-save-btn').addEventListener('click', () => {
+            if (!this.currentLocation) { showToast('📍 No location loaded yet'); return; }
+            const { latitude, longitude } = this.currentLocation;
+            const name = this.locationName || 'Unknown';
+            if (Favourites.isFavourite(latitude, longitude)) {
+                showToast('⭐ Already in favourites');
+            } else {
+                Favourites.add({ name, display: name, lat: latitude, lon: longitude });
+                showToast(`⭐ Saved: ${name}`);
+            }
+        });
+
+        // Favourites panel toggle
+        document.getElementById('fav-toggle-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            const panel = document.getElementById('favorites-panel');
+            const isOpen = panel.classList.toggle('active');
+            document.getElementById('fav-toggle-btn').setAttribute('aria-expanded', String(isOpen));
+            document.getElementById('fav-toggle-btn').classList.toggle('btn-active', isOpen);
+            if (isOpen) {
+                Favourites.renderPanel();
+                History.renderHistory();
+            }
+        });
+
+        // Clear all favourites
+        document.getElementById('fav-clear-btn').addEventListener('click', () => {
+            Favourites.clear();
+            History.clear();
+            showToast('🗑️ Favourites & history cleared');
+        });
+
         // Update clock every minute
         setInterval(() => {
             const el = document.getElementById('loc-time');
@@ -922,6 +958,60 @@ class WeatherApp {
                 this.fetchWeather();
             } catch { /* ignore */ }
         }
+    }
+
+    /**
+     * Load weather for a specific lat/lon with a known display name.
+     * Called by Search, Favourites, History, and Comparison modules.
+     * @param {number} lat
+     * @param {number} lon
+     * @param {string} name - Display name for the location
+     */
+    async loadLocation(lat, lon, name) {
+        this.currentLocation = { latitude: lat, longitude: lon };
+        this.locationName = name || null;
+        localStorage.setItem('mini-weather-location', JSON.stringify(this.currentLocation));
+
+        // Show the save-to-favourites button now that we have a location
+        const saveBtn = document.getElementById('fav-save-btn');
+        if (saveBtn) saveBtn.style.display = '';
+
+        // If comparison panel is open, offer to add to comparison
+        const compPanel = document.getElementById('comparison-panel');
+        if (compPanel && compPanel.classList.contains('active')) {
+            Comparison.addLocation(lat, lon, name || 'Unknown');
+        }
+
+        await this.fetchWeather();
+    }
+
+    /**
+     * Fetch weather for a given lat/lon without updating the main UI.
+     * Used by the Comparison module to load weather for additional locations.
+     * @param {number} lat
+     * @param {number} lon
+     * @returns {Promise<Object>} Normalised weather object
+     */
+    async _fetchWeatherForLocation(lat, lon) {
+        const cacheKey = `${parseFloat(lat).toFixed(3)}-${parseFloat(lon).toFixed(3)}-${this.apiSource}`;
+        if (this.cache.has(cacheKey)) {
+            const cached = this.cache.get(cacheKey);
+            if (Date.now() - cached.time < this.cacheTime) return cached.data;
+        }
+
+        const api = this.apis[this.apiSource];
+        let weather = null;
+        try {
+            weather = await api.fetch(lat, lon);
+        } catch {
+            const fallbacks = ['weatherapi', 'open-meteo', 'nws', 'wttr'].filter(k => k !== this.apiSource);
+            for (const key of fallbacks) {
+                try { weather = await this.apis[key].fetch(lat, lon); break; } catch { /* try next */ }
+            }
+        }
+        if (!weather) throw new Error('All APIs failed');
+        this.cache.set(cacheKey, { data: weather, time: Date.now() });
+        return weather;
     }
 
     async requestLocation() {
@@ -942,6 +1032,11 @@ class WeatherApp {
             this.currentLocation = { latitude, longitude };
             localStorage.setItem('mini-weather-location', JSON.stringify(this.currentLocation));
             this.locationName = null; // Force re-fetch
+
+            // Clear search input so _render can populate it with the resolved name
+            const searchInput = document.getElementById('search-input');
+            if (searchInput) { searchInput.value = ''; document.getElementById('search-clear').classList.remove('visible'); }
+
             await this.fetchWeather();
         } catch (err) {
             const msg = err.code === 1
@@ -1041,6 +1136,23 @@ class WeatherApp {
 
         // Update unit button
         document.getElementById('unit-btn').textContent = `°${unit}`;
+
+        // Show favourites save button and update its state
+        const saveBtn = document.getElementById('fav-save-btn');
+        if (saveBtn) {
+            saveBtn.style.display = '';
+            const already = Favourites.isFavourite(latitude, longitude);
+            saveBtn.textContent = already ? '★' : '⭐';
+            saveBtn.title = already ? 'Already saved as favourite' : 'Save as favourite';
+            saveBtn.setAttribute('aria-label', already ? 'Already saved as favourite' : 'Save current location as favourite');
+        }
+
+        // Update search input to reflect current location name (if loaded via GPS)
+        const searchInput = document.getElementById('search-input');
+        if (searchInput && !searchInput.value) {
+            searchInput.value = this.locationName;
+            document.getElementById('search-clear').classList.add('visible');
+        }
 
         // Build alerts
         const alerts = this._buildAlerts(current, daily);
@@ -1198,7 +1310,9 @@ class WeatherApp {
             const now = new Date();
             const currentHour = now.getHours();
 
+            let hourlyRendered = 0;
             hourly.slice(0, 24).forEach((h, idx) => {
+                if (!Filter.passes({ code: h.code, temp: h.temp, precipChance: h.precipitation || 0 })) return;
                 const hDate = new Date(h.time);
                 const hHour = hDate.getHours();
                 const isNow = idx === 0;
@@ -1206,31 +1320,36 @@ class WeatherApp {
                 const hIcon = getWeatherIcon(h.code, hHour >= 6 && hHour < 20);
                 const hTemp = toDisplay(h.temp);
 
-                html += `<div class="hour${isNow ? '" style="border-color:var(--accent);background:var(--accent-glow)' : ''}">
+                html += `<div class="hour${isNow ? '" style="border-color:var(--accent);background:var(--accent-glow)' : ''}" role="listitem">
                     <div class="hour-time">${timeLabel}</div>
-                    <div class="hour-icon">${hIcon}</div>
+                    <div class="hour-icon" aria-hidden="true">${hIcon}</div>
                     <div class="hour-temp">${hTemp}°</div>
                     <div class="hour-precip">💧${h.precipitation}%</div>
                 </div>`;
+                hourlyRendered++;
             });
+            if (hourlyRendered === 0) html += `<div style="color:var(--text-muted);font-size:0.8rem;padding:10px;">No hourly data matches the current filters.</div>`;
 
             html += `</div></div>`;
         }
 
         // Daily forecast
         if (daily && daily.length > 0) {
+            const filterActive = Filter.isActive();
             html += `<div class="weather-card">
-                <div class="section-title">📅 14-Day Forecast</div>
-                <div class="daily">`;
+                <div class="section-title">📅 14-Day Forecast${filterActive ? ' <span style="font-size:0.65rem;color:var(--accent-light);font-weight:400;">(filtered)</span>' : ''}</div>
+                <div class="daily" role="list">`;
 
+            let dailyRendered = 0;
             daily.slice(0, 14).forEach((d, i) => {
+                if (!Filter.passes(d)) return;
                 const dateObj = new Date(d.date + 'T12:00:00');
                 const dateLabel = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : dateObj.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
                 const dIcon = getWeatherIcon(d.code, true);
 
-                html += `<div class="day">
+                html += `<div class="day" role="listitem" aria-label="${dateLabel}: ${d.condition}, ${toDisplay(d.maxTemp)}° / ${toDisplay(d.minTemp)}°">
                     <div class="day-date">${dateLabel}</div>
-                    <div class="day-icon">${dIcon}</div>
+                    <div class="day-icon" aria-hidden="true">${dIcon}</div>
                     <div class="day-condition">${(d.condition || '').substring(0, 14)}</div>
                     <div class="day-temps">
                         <span class="day-max">${toDisplay(d.maxTemp)}°</span>
@@ -1238,7 +1357,10 @@ class WeatherApp {
                     </div>
                     <div class="day-precip">💧${d.precipChance}%</div>
                 </div>`;
+                dailyRendered++;
             });
+
+            if (dailyRendered === 0) html += `<div style="color:var(--text-muted);font-size:0.8rem;padding:10px;">No days match the current filters.</div>`;
 
             html += `</div></div>`;
         }
@@ -1314,12 +1436,34 @@ class WeatherApp {
             </div>`;
     }
 
+    /**
+     * Display a user-friendly error message in the weather content area.
+     * @param {string} message - Error description
+     */
     showError(message) {
+        // Translate technical errors into user-friendly language
+        let friendly = message;
+        if (message.includes('Failed to fetch') || message.includes('NetworkError') || message.includes('net::')) {
+            friendly = 'No internet connection. Please check your network and try again.';
+        } else if (message.includes('timeout') || message.includes('AbortError')) {
+            friendly = 'The request timed out. Your connection may be slow — please try again.';
+        } else if (message.includes('HTTP 4')) {
+            friendly = 'The weather service returned an error. Please try a different data source.';
+        } else if (message.includes('HTTP 5') || message.includes('All weather APIs')) {
+            friendly = 'All weather services are temporarily unavailable. Please try again in a moment.';
+        } else if (message.includes('Not in US coverage')) {
+            friendly = 'The National Weather Service only covers the United States. Try switching to Open-Meteo.';
+        }
+
         document.getElementById('weather-content').innerHTML = `
-            <div class="error">
+            <div class="error" role="alert">
                 <div class="error-title">⚠️ Unable to load weather</div>
-                <div class="error-msg">${message}</div>
-                <button class="btn-primary" onclick="app.requestLocation()">📍 Try Again</button>
+                <div class="error-msg">${friendly}</div>
+                <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px;">
+                    <button class="btn-primary" onclick="app.requestLocation()" aria-label="Try getting location again">📍 Use My Location</button>
+                    <button onclick="document.getElementById('search-input').focus()" aria-label="Search for a location">🔍 Search Location</button>
+                    <button onclick="app.showAPIModal()" aria-label="Change data source">🔌 Change Source</button>
+                </div>
             </div>`;
     }
 
@@ -1390,6 +1534,857 @@ class WeatherApp {
 }
 
 /* ============================================================
+   SEARCH MODULE
+   ============================================================ */
+
+/**
+ * Rate-limited Nominatim search with debounce.
+ * Enforces a 1-second gap between requests per Nominatim usage policy.
+ */
+const Search = (() => {
+    const NOMINATIM = 'https://nominatim.openstreetmap.org';
+    const DEBOUNCE_MS = 400;
+    const MIN_QUERY_LEN = 2;
+    const MAX_RESULTS = 6;
+    const RATE_LIMIT_MS = 1000;
+
+    let _debounceTimer = null;
+    let _lastRequestTime = 0;
+    let _abortController = null;
+    let _focusedIndex = -1;
+
+    /** @type {Array<{name:string, lat:number, lon:number, display:string, type:string}>} */
+    let _currentResults = [];
+
+    /**
+     * Search Nominatim for locations matching `query`.
+     * @param {string} query
+     * @returns {Promise<Array>}
+     */
+    async function searchLocations(query) {
+        const now = Date.now();
+        const wait = RATE_LIMIT_MS - (now - _lastRequestTime);
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+
+        if (_abortController) _abortController.abort();
+        _abortController = new AbortController();
+        _lastRequestTime = Date.now();
+
+        const params = new URLSearchParams({
+            q: query,
+            format: 'json',
+            limit: String(MAX_RESULTS),
+            addressdetails: '1',
+            'accept-language': navigator.language || 'en'
+        });
+
+        const res = await fetch(`${NOMINATIM}/search?${params}`, {
+            signal: _abortController.signal,
+            headers: { 'Accept-Language': navigator.language || 'en' }
+        });
+
+        if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
+        return res.json();
+    }
+
+    /**
+     * Format a Nominatim result into a display-friendly object.
+     * @param {Object} r - Raw Nominatim result
+     * @returns {{name:string, lat:number, lon:number, display:string, type:string}}
+     */
+    function formatResult(r) {
+        const a = r.address || {};
+        const name = a.city || a.town || a.village || a.county || a.state || r.display_name.split(',')[0];
+        const parts = [];
+        if (a.state && a.state !== name) parts.push(a.state);
+        if (a.country) parts.push(a.country);
+        return {
+            name,
+            lat: parseFloat(r.lat),
+            lon: parseFloat(r.lon),
+            display: parts.length ? `${name}, ${parts.join(', ')}` : name,
+            sub: parts.join(', '),
+            type: r.type || r.class || 'place'
+        };
+    }
+
+    /** Show loading indicator in autocomplete dropdown. */
+    function showLoading() {
+        const el = document.getElementById('search-autocomplete');
+        el.innerHTML = '<div class="autocomplete-loading">🔍 Searching…</div>';
+        el.classList.add('active');
+        document.getElementById('search-input').setAttribute('aria-expanded', 'true');
+    }
+
+    /** Hide the autocomplete dropdown. */
+    function hideDropdown() {
+        const el = document.getElementById('search-autocomplete');
+        el.classList.remove('active');
+        el.innerHTML = '';
+        document.getElementById('search-input').setAttribute('aria-expanded', 'false');
+        _focusedIndex = -1;
+        _currentResults = [];
+    }
+
+    /**
+     * Render autocomplete results, optionally prepending history/favourites.
+     * @param {Array} results - Formatted location results
+     */
+    function renderResults(results) {
+        const el = document.getElementById('search-autocomplete');
+        el.innerHTML = '';
+        _currentResults = results;
+        _focusedIndex = -1;
+
+        if (!results.length) {
+            el.innerHTML = '<div class="autocomplete-loading">No results found</div>';
+            el.classList.add('active');
+            document.getElementById('search-input').setAttribute('aria-expanded', 'true');
+            return;
+        }
+
+        // Prepend history/favourites suggestions when query is short
+        const query = document.getElementById('search-input').value.trim().toLowerCase();
+        const history = History.get();
+        const favs = Favourites.get();
+        const suggestions = [...favs, ...history].filter(
+            s => s.name.toLowerCase().includes(query) && query.length > 0
+        ).slice(0, 3);
+
+        if (suggestions.length) {
+            const label = document.createElement('div');
+            label.className = 'autocomplete-section-label';
+            label.textContent = 'Recent & Favourites';
+            el.appendChild(label);
+
+            suggestions.forEach(s => {
+                const item = _makeItem('🕐', s.name, s.sub || '', s);
+                el.appendChild(item);
+            });
+
+            const label2 = document.createElement('div');
+            label2.className = 'autocomplete-section-label';
+            label2.textContent = 'Search Results';
+            el.appendChild(label2);
+        }
+
+        results.forEach(r => {
+            const icon = _typeIcon(r.type);
+            const item = _makeItem(icon, r.name, r.sub, r);
+            el.appendChild(item);
+        });
+
+        el.classList.add('active');
+        document.getElementById('search-input').setAttribute('aria-expanded', 'true');
+    }
+
+    /**
+     * Build a single autocomplete list item element.
+     * @param {string} icon
+     * @param {string} name
+     * @param {string} sub
+     * @param {{lat:number, lon:number, name:string}} location
+     * @returns {HTMLElement}
+     */
+    function _makeItem(icon, name, sub, location) {
+        const item = document.createElement('div');
+        item.className = 'autocomplete-item';
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-label', location.display || name);
+        item.innerHTML = `
+            <span class="autocomplete-item-icon" aria-hidden="true">${icon}</span>
+            <div>
+                <div class="autocomplete-item-name">${_escHtml(name)}</div>
+                ${sub ? `<div class="autocomplete-item-sub">${_escHtml(sub)}</div>` : ''}
+            </div>`;
+        item.addEventListener('mousedown', (e) => {
+            e.preventDefault(); // prevent input blur before click fires
+            selectLocation(location);
+        });
+        return item;
+    }
+
+    /** Map Nominatim type to an emoji icon. */
+    function _typeIcon(type) {
+        if (['city', 'town', 'village', 'hamlet'].includes(type)) return '🏙️';
+        if (['administrative', 'county', 'state'].includes(type)) return '🗺️';
+        if (['airport'].includes(type)) return '✈️';
+        if (['peak', 'mountain'].includes(type)) return '⛰️';
+        if (['beach'].includes(type)) return '🏖️';
+        return '📍';
+    }
+
+    /** Escape HTML special characters. */
+    function _escHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    /**
+     * Select a location from the autocomplete list and load its weather.
+     * @param {{lat:number, lon:number, name:string, display:string}} location
+     */
+    function selectLocation(location) {
+        hideDropdown();
+        const input = document.getElementById('search-input');
+        input.value = location.display || location.name;
+        document.getElementById('search-clear').classList.add('visible');
+
+        History.add(location);
+        app.loadLocation(location.lat, location.lon, location.display || location.name);
+    }
+
+    /** Handle keyboard navigation within the autocomplete dropdown. */
+    function handleKeydown(e) {
+        const el = document.getElementById('search-autocomplete');
+        if (!el.classList.contains('active')) return;
+
+        const items = el.querySelectorAll('.autocomplete-item');
+        if (!items.length) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            _focusedIndex = Math.min(_focusedIndex + 1, items.length - 1);
+            _updateFocus(items);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            _focusedIndex = Math.max(_focusedIndex - 1, 0);
+            _updateFocus(items);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (_focusedIndex >= 0 && items[_focusedIndex]) {
+                items[_focusedIndex].dispatchEvent(new MouseEvent('mousedown'));
+            } else if (_currentResults.length) {
+                selectLocation(_currentResults[0]);
+            }
+        } else if (e.key === 'Escape') {
+            hideDropdown();
+            document.getElementById('search-input').blur();
+        }
+    }
+
+    function _updateFocus(items) {
+        items.forEach((item, i) => item.classList.toggle('focused', i === _focusedIndex));
+        if (items[_focusedIndex]) items[_focusedIndex].scrollIntoView({ block: 'nearest' });
+    }
+
+    /** Initialise search input event listeners. */
+    function init() {
+        const input = document.getElementById('search-input');
+        const clearBtn = document.getElementById('search-clear');
+
+        input.addEventListener('input', () => {
+            const q = input.value.trim();
+            clearBtn.classList.toggle('visible', q.length > 0);
+
+            clearTimeout(_debounceTimer);
+            if (q.length < MIN_QUERY_LEN) {
+                hideDropdown();
+                return;
+            }
+
+            _debounceTimer = setTimeout(async () => {
+                showLoading();
+                try {
+                    const raw = await searchLocations(q);
+                    renderResults(raw.map(formatResult));
+                } catch (err) {
+                    if (err.name === 'AbortError') return;
+                    const el = document.getElementById('search-autocomplete');
+                    el.innerHTML = `<div class="autocomplete-loading">⚠️ Search failed — check your connection</div>`;
+                }
+            }, DEBOUNCE_MS);
+        });
+
+        input.addEventListener('keydown', handleKeydown);
+
+        input.addEventListener('focus', () => {
+            const q = input.value.trim();
+            if (q.length >= MIN_QUERY_LEN) return; // already showing results
+
+            // Show recent history/favourites on focus with empty input
+            const history = History.get();
+            const favs = Favourites.get();
+            const recent = [...favs.slice(0, 3), ...history.slice(0, 3)];
+            if (!recent.length) return;
+
+            const el = document.getElementById('search-autocomplete');
+            el.innerHTML = '';
+            const label = document.createElement('div');
+            label.className = 'autocomplete-section-label';
+            label.textContent = 'Recent & Favourites';
+            el.appendChild(label);
+            recent.forEach(s => {
+                const item = _makeItem('🕐', s.name, s.sub || '', s);
+                el.appendChild(item);
+            });
+            el.classList.add('active');
+            input.setAttribute('aria-expanded', 'true');
+        });
+
+        input.addEventListener('blur', () => {
+            // Delay to allow mousedown on item to fire first
+            setTimeout(hideDropdown, 200);
+        });
+
+        clearBtn.addEventListener('click', () => {
+            input.value = '';
+            clearBtn.classList.remove('visible');
+            hideDropdown();
+            input.focus();
+        });
+
+        // Close autocomplete when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.search-input-wrapper')) hideDropdown();
+        });
+    }
+
+    return { init, selectLocation, hideDropdown };
+})();
+
+/* ============================================================
+   FAVOURITES MODULE
+   ============================================================ */
+
+/**
+ * Manages saved favourite locations in localStorage.
+ * Each favourite: { name, display, sub, lat, lon }
+ */
+const Favourites = (() => {
+    const KEY = 'mini-weather-favourites';
+    const MAX = 10;
+
+    /** @returns {Array} */
+    function get() {
+        try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { return []; }
+    }
+
+    /**
+     * Add a location to favourites.
+     * @param {{name:string, display:string, lat:number, lon:number}} loc
+     */
+    function add(loc) {
+        const list = get().filter(f => !(Math.abs(f.lat - loc.lat) < 0.01 && Math.abs(f.lon - loc.lon) < 0.01));
+        list.unshift({ name: loc.name, display: loc.display || loc.name, sub: loc.sub || '', lat: loc.lat, lon: loc.lon });
+        localStorage.setItem(KEY, JSON.stringify(list.slice(0, MAX)));
+        renderPanel();
+    }
+
+    /**
+     * Remove a favourite by index.
+     * @param {number} idx
+     */
+    function remove(idx) {
+        const list = get();
+        list.splice(idx, 1);
+        localStorage.setItem(KEY, JSON.stringify(list));
+        renderPanel();
+    }
+
+    /** Clear all favourites. */
+    function clear() {
+        localStorage.removeItem(KEY);
+        renderPanel();
+    }
+
+    /**
+     * Check if a location is already a favourite.
+     * @param {number} lat
+     * @param {number} lon
+     * @returns {boolean}
+     */
+    function isFavourite(lat, lon) {
+        return get().some(f => Math.abs(f.lat - lat) < 0.01 && Math.abs(f.lon - lon) < 0.01);
+    }
+
+    /** Re-render the favourites panel UI. */
+    function renderPanel() {
+        const list = get();
+        const el = document.getElementById('favorites-list');
+        if (!el) return;
+
+        el.innerHTML = '';
+        if (!list.length) {
+            el.innerHTML = '<span class="favorites-empty">No saved favourites yet. Search a location and tap ⭐ to save it.</span>';
+        } else {
+            list.forEach((fav, i) => {
+                const chip = document.createElement('div');
+                chip.className = 'favorite-chip';
+                chip.setAttribute('role', 'listitem');
+                chip.setAttribute('aria-label', `Load ${fav.display}`);
+                chip.innerHTML = `
+                    <span aria-hidden="true">⭐</span>
+                    <span class="favorite-chip-name" title="${fav.display}">${fav.name}</span>
+                    <span class="favorite-chip-remove" role="button" aria-label="Remove ${fav.name} from favourites" tabindex="0" data-idx="${i}">✕</span>`;
+
+                chip.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('favorite-chip-remove')) return;
+                    app.loadLocation(fav.lat, fav.lon, fav.display);
+                });
+                chip.querySelector('.favorite-chip-remove').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    remove(i);
+                });
+                chip.querySelector('.favorite-chip-remove').addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); remove(i); }
+                });
+                el.appendChild(chip);
+            });
+        }
+
+        // Update save button state
+        const saveBtn = document.getElementById('fav-save-btn');
+        if (saveBtn && app.currentLocation) {
+            const { latitude, longitude } = app.currentLocation;
+            const already = isFavourite(latitude, longitude);
+            saveBtn.textContent = already ? '★' : '⭐';
+            saveBtn.title = already ? 'Already saved' : 'Save as favourite';
+            saveBtn.setAttribute('aria-label', already ? 'Already saved as favourite' : 'Save current location as favourite');
+        }
+    }
+
+    return { get, add, remove, clear, isFavourite, renderPanel };
+})();
+
+/* ============================================================
+   HISTORY MODULE
+   ============================================================ */
+
+/**
+ * Tracks the last 10 searched locations.
+ * Each entry: { name, display, sub, lat, lon, ts }
+ */
+const History = (() => {
+    const KEY = 'mini-weather-history';
+    const MAX = 10;
+
+    /** @returns {Array} */
+    function get() {
+        try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { return []; }
+    }
+
+    /**
+     * Add a location to history.
+     * @param {{name:string, display:string, lat:number, lon:number}} loc
+     */
+    function add(loc) {
+        const list = get().filter(h => !(Math.abs(h.lat - loc.lat) < 0.01 && Math.abs(h.lon - loc.lon) < 0.01));
+        list.unshift({ name: loc.name, display: loc.display || loc.name, sub: loc.sub || '', lat: loc.lat, lon: loc.lon, ts: Date.now() });
+        localStorage.setItem(KEY, JSON.stringify(list.slice(0, MAX)));
+        renderHistory();
+    }
+
+    /** Clear all history. */
+    function clear() {
+        localStorage.removeItem(KEY);
+        renderHistory();
+    }
+
+    /** Re-render the history chips inside the favourites panel. */
+    function renderHistory() {
+        const el = document.getElementById('history-list');
+        if (!el) return;
+        const list = get();
+        el.innerHTML = '';
+        if (!list.length) return;
+
+        const label = document.createElement('div');
+        label.style.cssText = 'font-size:0.62rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:6px;width:100%;';
+        label.textContent = 'Recent Searches';
+        el.appendChild(label);
+
+        list.forEach(h => {
+            const chip = document.createElement('div');
+            chip.className = 'history-chip';
+            chip.setAttribute('role', 'listitem');
+            chip.setAttribute('aria-label', `Load ${h.display}`);
+            chip.innerHTML = `<span aria-hidden="true">🕐</span> ${h.name}`;
+            chip.addEventListener('click', () => app.loadLocation(h.lat, h.lon, h.display));
+            el.appendChild(chip);
+        });
+    }
+
+    return { get, add, clear, renderHistory };
+})();
+
+/* ============================================================
+   EXPORT MODULE
+   ============================================================ */
+
+/**
+ * Exports current weather data as JSON, CSV, or clipboard text.
+ */
+const Exporter = (() => {
+    /**
+     * Trigger a file download in the browser.
+     * @param {string} content - File content
+     * @param {string} filename
+     * @param {string} mimeType
+     */
+    function _download(content, filename, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    /**
+     * Export weather data as a formatted JSON file.
+     * @param {Object} weather - Normalised weather object
+     * @param {string} locationName
+     */
+    function toJSON(weather, locationName) {
+        if (!weather) { showToast('⚠️ No weather data to export'); return; }
+        const payload = {
+            exportedAt: new Date().toISOString(),
+            location: locationName,
+            source: weather.source,
+            current: weather.current,
+            daily: weather.daily,
+            hourly: weather.hourly
+        };
+        _download(JSON.stringify(payload, null, 2), `weather-${_slug(locationName)}.json`, 'application/json');
+        showToast('📄 JSON exported');
+    }
+
+    /**
+     * Export the 14-day daily forecast as a CSV file.
+     * @param {Object} weather - Normalised weather object
+     * @param {string} locationName
+     */
+    function toCSV(weather, locationName) {
+        if (!weather || !weather.daily || !weather.daily.length) {
+            showToast('⚠️ No forecast data to export');
+            return;
+        }
+        const headers = ['Date', 'Condition', 'Max Temp (°C)', 'Min Temp (°C)', 'Precip (mm)', 'Precip Chance (%)', 'Wind (km/h)', 'UV Index', 'Cloud Cover (%)'];
+        const rows = weather.daily.map(d => [
+            d.date,
+            `"${(d.condition || '').replace(/"/g, '""')}"`,
+            d.maxTemp,
+            d.minTemp,
+            d.precipitation,
+            d.precipChance,
+            d.wind,
+            d.uvIndex,
+            d.cloudCover
+        ]);
+        const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+        _download(csv, `weather-${_slug(locationName)}.csv`, 'text/csv');
+        showToast('📊 CSV exported');
+    }
+
+    /**
+     * Copy a plain-text weather summary to the clipboard.
+     * @param {Object} weather - Normalised weather object
+     * @param {string} locationName
+     */
+    async function toClipboard(weather, locationName) {
+        if (!weather) { showToast('⚠️ No weather data to copy'); return; }
+        const c = weather.current;
+        const text = [
+            `Mini Weather — ${locationName}`,
+            `Updated: ${new Date().toLocaleString()}`,
+            `Source: ${weather.source}`,
+            '',
+            `Temperature: ${Math.round(c.temp)}°C (feels like ${Math.round(c.feelsLike)}°C)`,
+            `Condition: ${c.description}`,
+            `Humidity: ${c.humidity}%`,
+            `Wind: ${Math.round(c.windSpeed)} km/h ${getWindDirection(c.windDir || 0)}`,
+            `UV Index: ${Math.round(c.uvIndex)} (${getUVLabel(c.uvIndex)})`,
+            `Pressure: ${Math.round(c.pressure)} hPa`,
+            `Visibility: ${parseFloat(c.visibility).toFixed(1)} km`,
+            '',
+            '14-Day Forecast:',
+            ...(weather.daily || []).slice(0, 7).map(d =>
+                `  ${d.date}: ${d.condition} | ${Math.round(d.maxTemp)}°/${Math.round(d.minTemp)}° | 💧${d.precipChance}%`
+            )
+        ].join('\n');
+
+        try {
+            await navigator.clipboard.writeText(text);
+            showToast('📋 Copied to clipboard');
+        } catch {
+            showToast('⚠️ Clipboard access denied');
+        }
+    }
+
+    /** Slugify a string for use in filenames. */
+    function _slug(str) {
+        return String(str).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'weather';
+    }
+
+    /** Initialise export button and dropdown. */
+    function init() {
+        const btn = document.getElementById('export-btn');
+        const dropdown = document.getElementById('export-dropdown');
+
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.toggle('active');
+            btn.setAttribute('aria-expanded', String(isOpen));
+        });
+
+        dropdown.querySelectorAll('.export-option').forEach(opt => {
+            const handler = () => {
+                dropdown.classList.remove('active');
+                btn.setAttribute('aria-expanded', 'false');
+                const fmt = opt.dataset.format;
+                const weather = app.currentWeather;
+                const name = app.locationName || 'Unknown';
+                if (fmt === 'json') toJSON(weather, name);
+                else if (fmt === 'csv') toCSV(weather, name);
+                else if (fmt === 'copy') toClipboard(weather, name);
+            };
+            opt.addEventListener('click', handler);
+            opt.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } });
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.export-menu')) {
+                dropdown.classList.remove('active');
+                btn.setAttribute('aria-expanded', 'false');
+            }
+        });
+    }
+
+    return { init, toJSON, toCSV, toClipboard };
+})();
+
+/* ============================================================
+   COMPARISON MODULE
+   ============================================================ */
+
+/**
+ * Manages side-by-side weather comparison for up to 3 locations.
+ */
+const Comparison = (() => {
+    const MAX_SLOTS = 3;
+    /** @type {Array<{name:string, lat:number, lon:number, weather:Object|null}>} */
+    let _slots = [];
+
+    /**
+     * Add a location to the comparison view.
+     * @param {number} lat
+     * @param {number} lon
+     * @param {string} name
+     */
+    async function addLocation(lat, lon, name) {
+        if (_slots.length >= MAX_SLOTS) {
+            showToast(`⚖️ Max ${MAX_SLOTS} locations for comparison`);
+            return;
+        }
+        if (_slots.some(s => Math.abs(s.lat - lat) < 0.01 && Math.abs(s.lon - lon) < 0.01)) {
+            showToast('⚖️ Location already in comparison');
+            return;
+        }
+
+        const slot = { name, lat, lon, weather: null, loading: true };
+        _slots.push(slot);
+        render();
+        showToast(`⚖️ Loading ${name}…`);
+
+        try {
+            slot.weather = await app._fetchWeatherForLocation(lat, lon);
+            slot.loading = false;
+        } catch (err) {
+            slot.loading = false;
+            slot.error = err.message || 'Failed to load';
+        }
+        render();
+    }
+
+    /**
+     * Remove a slot by index.
+     * @param {number} idx
+     */
+    function removeSlot(idx) {
+        _slots.splice(idx, 1);
+        render();
+    }
+
+    /** Clear all comparison slots. */
+    function clear() {
+        _slots = [];
+        render();
+    }
+
+    /** Re-render the comparison slots UI. */
+    function render() {
+        const container = document.getElementById('comparison-slots');
+        if (!container) return;
+        container.innerHTML = '';
+
+        _slots.forEach((slot, i) => {
+            const div = document.createElement('div');
+            div.className = 'comparison-slot';
+            div.setAttribute('role', 'listitem');
+
+            if (slot.loading) {
+                div.innerHTML = `
+                    <div class="comparison-slot-name">${slot.name}</div>
+                    <div class="spinner" style="width:28px;height:28px;border-width:2px;" role="status" aria-label="Loading"></div>`;
+            } else if (slot.error) {
+                div.innerHTML = `
+                    <div class="comparison-slot-name">${slot.name}</div>
+                    <div style="color:var(--danger);font-size:0.72rem;">⚠️ ${slot.error}</div>`;
+            } else if (slot.weather) {
+                const c = slot.weather.current;
+                const icon = getWeatherIcon(c.code, c.isDay !== false);
+                div.innerHTML = `
+                    <button class="comparison-slot-remove" aria-label="Remove ${slot.name} from comparison">✕</button>
+                    <div class="comparison-slot-name">${slot.name}</div>
+                    <div class="comparison-slot-icon" aria-hidden="true">${icon}</div>
+                    <div class="comparison-slot-temp">${Math.round(c.temp)}°</div>
+                    <div class="comparison-slot-desc">${c.description}</div>
+                    <div class="comparison-slot-stats">
+                        💧${c.humidity}% · 💨${Math.round(c.windSpeed)} km/h<br>
+                        ☀️UV ${Math.round(c.uvIndex)} · 🔬${Math.round(c.pressure)} hPa
+                    </div>`;
+                div.querySelector('.comparison-slot-remove').addEventListener('click', () => removeSlot(i));
+            }
+
+            container.appendChild(div);
+        });
+
+        // Add empty slot placeholders
+        for (let i = _slots.length; i < MAX_SLOTS; i++) {
+            const div = document.createElement('div');
+            div.className = 'comparison-slot empty';
+            div.setAttribute('role', 'listitem');
+            div.setAttribute('aria-label', 'Add location to compare');
+            div.innerHTML = `<span aria-hidden="true">➕</span><span>Add location</span>`;
+            div.addEventListener('click', () => {
+                document.getElementById('search-input').focus();
+                showToast('🔍 Search a location to add to comparison');
+            });
+            container.appendChild(div);
+        }
+    }
+
+    /** Initialise comparison panel toggle. */
+    function init() {
+        document.getElementById('compare-toggle-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            const panel = document.getElementById('comparison-panel');
+            const isOpen = panel.classList.toggle('active');
+            document.getElementById('compare-toggle-btn').setAttribute('aria-expanded', String(isOpen));
+            document.getElementById('compare-toggle-btn').classList.toggle('btn-active', isOpen);
+            if (isOpen) render();
+        });
+
+        document.getElementById('compare-clear-btn').addEventListener('click', clear);
+    }
+
+    return { init, addLocation, removeSlot, clear, render };
+})();
+
+/* ============================================================
+   FILTER MODULE
+   ============================================================ */
+
+/**
+ * Filters the rendered daily/hourly forecast cards by condition,
+ * temperature range, and precipitation chance.
+ */
+const Filter = (() => {
+    /** @type {{condition:string, tempMin:number|null, tempMax:number|null, precipMax:number|null}} */
+    let _active = { condition: '', tempMin: null, tempMax: null, precipMax: null };
+
+    /** WMO code → condition category mapping. */
+    const CODE_CATEGORY = {
+        0: 'clear', 1: 'clear',
+        2: 'cloudy', 3: 'cloudy',
+        45: 'fog', 48: 'fog',
+        51: 'rain', 53: 'rain', 55: 'rain', 56: 'rain', 57: 'rain',
+        61: 'rain', 63: 'rain', 65: 'rain', 66: 'rain', 67: 'rain',
+        71: 'snow', 73: 'snow', 75: 'snow', 77: 'snow',
+        80: 'rain', 81: 'rain', 82: 'rain',
+        85: 'snow', 86: 'snow',
+        95: 'storm', 96: 'storm', 99: 'storm'
+    };
+
+    /**
+     * Check whether a forecast day/hour passes the active filters.
+     * @param {{code:number, maxTemp?:number, temp?:number, precipChance:number}} item
+     * @returns {boolean}
+     */
+    function passes(item) {
+        const { condition, tempMin, tempMax, precipMax } = _active;
+        if (condition) {
+            const cat = CODE_CATEGORY[item.code] || 'clear';
+            if (cat !== condition) return false;
+        }
+        const temp = item.maxTemp !== undefined ? item.maxTemp : item.temp;
+        if (tempMin !== null && temp < tempMin) return false;
+        if (tempMax !== null && temp > tempMax) return false;
+        if (precipMax !== null && (item.precipChance || 0) > precipMax) return false;
+        return true;
+    }
+
+    /** Read filter inputs and update _active state. */
+    function readFilters() {
+        _active.condition = document.getElementById('filter-condition').value;
+        const tMin = document.getElementById('filter-temp-min').value;
+        const tMax = document.getElementById('filter-temp-max').value;
+        const pMax = document.getElementById('filter-precip-max').value;
+        _active.tempMin = tMin !== '' ? parseFloat(tMin) : null;
+        _active.tempMax = tMax !== '' ? parseFloat(tMax) : null;
+        _active.precipMax = pMax !== '' ? parseFloat(pMax) : null;
+    }
+
+    /** Reset all filter inputs and state. */
+    function reset() {
+        _active = { condition: '', tempMin: null, tempMax: null, precipMax: null };
+        document.getElementById('filter-condition').value = '';
+        document.getElementById('filter-temp-min').value = '';
+        document.getElementById('filter-temp-max').value = '';
+        document.getElementById('filter-precip-max').value = '';
+        if (app.currentWeather) app._render();
+        showToast('🔽 Filters cleared');
+    }
+
+    /** Check if any filter is currently active. */
+    function isActive() {
+        return _active.condition !== '' || _active.tempMin !== null || _active.tempMax !== null || _active.precipMax !== null;
+    }
+
+    /** Initialise filter bar event listeners. */
+    function init() {
+        const toggleBtn = document.getElementById('filter-toggle-btn');
+        const filterBar = document.getElementById('filter-bar');
+
+        toggleBtn.addEventListener('click', () => {
+            const isOpen = filterBar.classList.toggle('active');
+            toggleBtn.setAttribute('aria-expanded', String(isOpen));
+            toggleBtn.classList.toggle('btn-active', isOpen);
+        });
+
+        ['filter-condition', 'filter-temp-min', 'filter-temp-max', 'filter-precip-max'].forEach(id => {
+            document.getElementById(id).addEventListener('change', () => {
+                readFilters();
+                if (app.currentWeather) app._render();
+            });
+            document.getElementById(id).addEventListener('input', () => {
+                readFilters();
+                if (app.currentWeather) app._render();
+            });
+        });
+
+        document.getElementById('filter-reset-btn').addEventListener('click', reset);
+    }
+
+    return { init, passes, isActive, readFilters, reset };
+})();
+
+/* ============================================================
    INITIALIZE
    ============================================================ */
 // Apply saved theme
@@ -1398,3 +2393,13 @@ initThemes();
 
 // Create app instance
 const app = new WeatherApp();
+
+// Initialise new feature modules (after app is created so they can reference it)
+Search.init();
+Exporter.init();
+Comparison.init();
+Filter.init();
+
+// Render initial favourites/history panels
+Favourites.renderPanel();
+History.renderHistory();
