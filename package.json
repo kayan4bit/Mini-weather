@@ -1,0 +1,15 @@
+{
+  "name": "mini-weather-pro",
+  "version": "2.0.0",
+  "description": "Professional weather app with AI forecasting, virtual garden, and 50+ themes",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  }
+}
+
